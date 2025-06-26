@@ -38,10 +38,7 @@ def create_access_token(data: dict):
         'type': 'access',
         'jti': str(uuid.uuid4())
     })
-    return {
-        'access_key': jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM),
-        'expiration': datetime.fromtimestamp(to_encode['exp']).strftime('%Y-%m-%d %H:%M:%S')
-    }
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def create_refresh_token(data: dict):
@@ -53,10 +50,7 @@ def create_refresh_token(data: dict):
         'type': 'refresh',
         'jti': str(uuid.uuid4())
     })
-    return {
-        'refresh_key': jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM),
-        'expiration': datetime.fromtimestamp(to_encode['exp']).strftime('%Y-%m-%d %H:%M:%S')
-    }
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def is_access_token_expired(token: str):
@@ -86,11 +80,11 @@ def is_refresh_token_expired(token: str):
 def decode_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get('type') != 'access' or payload.get('type') != 'refresh':
-            return None
+        if payload.get('type') not in ('access', 'refresh'):
+            raise HTTPException(status_code=401, detail='Invalid token type')
         return payload
-    except JWTError:
-        return None
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail='Invalid token') from e
     
 
 def is_token_blacklisted(token: str, session: Session) -> bool:
@@ -99,11 +93,9 @@ def is_token_blacklisted(token: str, session: Session) -> bool:
         token_id = payload.get('jti')
         if not token_id:
             return True
-        
         blacklisted = session.exec(
             select(BlacklistedToken).where(BlacklistedToken.token_id == token_id)
         ).first()
-
         return blacklisted is not None
     except JWTError:
         return True
@@ -114,10 +106,8 @@ def blacklist_token(token: str, session: Session):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         token_id = payload.get('jti')
         exp_timestamp = payload.get('exp')
-
         if not token_id or not exp_timestamp:
-            return False
-        
+            raise HTTPException(status_code=400, detail='Invalid token for blacklisting')
         # add token to blacklist
         blacklist_token = BlacklistedToken(
             token_id=token_id,
@@ -126,8 +116,8 @@ def blacklist_token(token: str, session: Session):
         session.add(blacklist_token)
         session.commit()
         return True
-    except JWTError:
-        return False
+    except JWTError as e:
+        raise HTTPException(status_code=400, detail='Invalid token for blacklisting') from e
     
 
 def validate_token(token: str, session: Session):
