@@ -40,7 +40,7 @@ def create_access_token(data: dict):
     })
     return {
         'access_key': jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM),
-        'expiration': to_encode['exp']
+        'expiration': datetime.fromtimestamp(to_encode['exp']).strftime('%Y-%m-%d %H:%M:%S')
     }
 
 
@@ -55,7 +55,7 @@ def create_refresh_token(data: dict):
     })
     return {
         'refresh_key': jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM),
-        'expiration': to_encode['exp']
+        'expiration': datetime.fromtimestamp(to_encode['exp']).strftime('%Y-%m-%d %H:%M:%S')
     }
 
 

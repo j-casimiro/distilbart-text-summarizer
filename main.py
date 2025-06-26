@@ -28,7 +28,7 @@ async def lifespan(app: SQLModel):
     print('Shutdown')
     pass
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 origins = [
     "http://localhost:3000",
@@ -47,6 +47,7 @@ app.add_middleware(
 def get_session():
     with Session(engine) as session:
         yield session
+
 
 @app.get('/')
 def index():
@@ -74,6 +75,7 @@ def register(user: UserCreate, session: Session = Depends(get_session)):
     return {'id': db_user.id, 'email': db_user.email}
 
 
+# login user
 @app.post('/login')
 def login(
     response: Response,
@@ -88,7 +90,6 @@ def login(
     refresh_token = create_refresh_token(data={'sub': str(user.id)})
 
     # set refresh token in HTTP-only cookie
-
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -103,3 +104,14 @@ def login(
         'user': user,
         'token_type': 'bearer'
     }
+
+
+# get current user
+def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Depends(get_session)):
+    validate_token(token, session)
+    payload = decode_token(token)
+    user_id = int(payload.get('sub'))
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail='User not found')
+    return user
