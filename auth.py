@@ -12,9 +12,9 @@ from fastapi import HTTPException
 
 load_dotenv()
 # Google OAuth 2.0 endpoints
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_AUTH_URL = os.getenv("GOOGLE_AUTH_URL")
+GOOGLE_TOKEN_URL = os.getenv("GOOGLE_TOKEN_URL")
+GOOGLE_USERINFO_URL = os.getenv("GOOGLE_USERINFO_URL")
 
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES'))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv('REFRESH_TOKEN_EXPIRE_DAYS'))
