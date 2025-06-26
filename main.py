@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
+from fastapi.responses import RedirectResponse
+import requests
 
 from database import engine, init_db
 from models import User, UserCreate, UserRead
@@ -23,6 +25,10 @@ from auth import (
 )
 
 load_dotenv()
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
+GOOGLE_REDIRECT_URI = "http://127.0.0.1:8000/auth/google/callback"
+
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv('REFRESH_TOKEN_EXPIRE_DAYS', 7))
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/login')
 
@@ -184,3 +190,82 @@ def token_validate(
             "valid": False,
             "detail": e.detail
         }
+
+@app.get('/auth/google/login')
+def google_login():
+    params = {
+        'client_id': GOOGLE_CLIENT_ID,
+        'redirect_uri': GOOGLE_REDIRECT_URI,
+        'response_type': 'code',
+        'scope': 'openid email profile',
+        'access_type': 'offline',
+        'prompt': 'consent',
+    }
+    from urllib.parse import urlencode
+    url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    return RedirectResponse(url)
+
+@app.get('/auth/google/callback')
+def google_callback(code: str, response: Response, session: Session = Depends(get_session)):
+    # Exchange code for tokens
+    token_data = {
+        'code': code,
+        'client_id': GOOGLE_CLIENT_ID,
+        'client_secret': GOOGLE_CLIENT_SECRET,
+        'redirect_uri': GOOGLE_REDIRECT_URI,
+        'grant_type': 'authorization_code',
+    }
+    token_resp = requests.post('https://oauth2.googleapis.com/token', data=token_data)
+    if not token_resp.ok:
+        raise HTTPException(status_code=400, detail='Failed to obtain token from Google')
+    tokens = token_resp.json()
+    id_token = tokens.get('id_token')
+    access_token = tokens.get('access_token')
+    if not access_token:
+        raise HTTPException(status_code=400, detail='No access token from Google')
+
+    # Fetch user info
+    userinfo_resp = requests.get(
+        'https://www.googleapis.com/oauth2/v3/userinfo',
+        headers={'Authorization': f'Bearer {access_token}'}
+    )
+    if not userinfo_resp.ok:
+        raise HTTPException(status_code=400, detail='Failed to fetch user info from Google')
+    userinfo = userinfo_resp.json()
+    email = userinfo.get('email')
+    name = userinfo.get('name')
+    if not email:
+        raise HTTPException(status_code=400, detail='Google account has no email')
+
+    # Check if user exists, else create
+    user = session.exec(select(User).where(User.email == email)).first()
+    if not user:
+        user = User(
+            name=name or email.split('@')[0],
+            email=email,
+            hashed_password=get_password_hash(os.urandom(16).hex())  # random password
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+    # Issue tokens
+    app_access_token = create_access_token(data={'sub': str(user.id)})
+    app_refresh_token = create_refresh_token(data={'sub': str(user.id)})
+    max_age = int(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS).total_seconds())
+    response.set_cookie(
+        key='refresh_token',
+        value=app_refresh_token,
+        httponly=True,
+        samesite='strict',
+        max_age=max_age
+    )
+    # You can redirect to frontend with access token as query param, or return JSON
+    return {
+        'access_token': app_access_token,
+        'refresh_token': app_refresh_token,
+        'token_type': 'bearer',
+        'user': {'id': user.id, 'email': user.email, 'name': user.name}
+    }
+
+
