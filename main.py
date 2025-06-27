@@ -96,7 +96,8 @@ def login(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        samesite='strict',
+        secure=True,
+        samesite="none",
         max_age=max_age
     )
     return {
@@ -142,7 +143,8 @@ def refresh_token(
         key='refresh_token',
         value=new_refresh_token,
         httponly=True,
-        samesite='strict',
+        secure=True,
+        samesite="none",
         max_age=max_age
     )
     return {
@@ -165,7 +167,7 @@ def logout(
         key="refresh_token",
         httponly=True,
         secure=True,
-        samesite="strict"
+        samesite="none",
     )
     return {"message": "Successfully logged out"}
 
@@ -257,7 +259,8 @@ def google_callback(code: str, response: Response, session: Session = Depends(ge
         key='refresh_token',
         value=app_refresh_token,
         httponly=True,
-        samesite='strict',
+        secure=True,
+        samesite="none",
         max_age=max_age
     )
     # You can redirect to frontend with access token as query param, or return JSON
