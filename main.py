@@ -25,6 +25,7 @@ from auth import (
 )
 
 load_dotenv()
+ENV = os.getenv("ENV", "prod")
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI')
@@ -42,12 +43,19 @@ async def lifespan(app: SQLModel):
 
 app = FastAPI(lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+if ENV == "dev":
+    allow_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:8000",
-    ],
+    ]
+else:
+    allow_origins = [
+        "https://your-production-frontend.com",
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
