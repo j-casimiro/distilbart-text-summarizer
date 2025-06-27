@@ -103,7 +103,7 @@ def register(user: UserCreate, session: Session = Depends(get_session)):
     session.add(db_user)
     session.commit()
     session.refresh(db_user)
-    return {'id': db_user.id, 'email': db_user.email}
+    return {'id': db_user.id, 'email': db_user.email, 'name': db_user.name}
 
 @app.post('/login')
 def login(
@@ -321,23 +321,30 @@ def summarize_document(
     for chunk in chunk_text(input_text):
         summary = summarizer(
             chunk,
-            max_length=256,
-            min_length=64,
+            max_length=512,   # Increased for more comprehensive output
+            min_length=128,   # Increased for more detail
             do_sample=False,
-            num_beams=8
+            num_beams=12      # More beams for less hallucination
         )[0]["summary_text"]
-        summaries.append(summary)
+        summaries.append(summary.strip())
+
     # Optionally, summarize the summaries for a final summary
     if len(summaries) > 1:
+        # Join with double newlines to encourage multi-paragraph output
+        combined = "\n\n".join(summaries)
         final_summary = summarizer(
-            " ".join(summaries),
-            max_length=256,
-            min_length=64,
+            combined,
+            max_length=512,
+            min_length=128,
             do_sample=False,
-            num_beams=6
-        )[0]["summary_text"]
+            num_beams=12
+        )[0]["summary_text"].strip()
     else:
         final_summary = summaries[0]
+
+    # If the final summary is still very long, split into paragraphs
+    paragraphs = final_summary.split('\n')
+    final_summary = '\n\n'.join([p.strip() for p in paragraphs if p.strip()])
 
     # Generate a title from the summary
     title_source = final_summary if final_summary else input_text

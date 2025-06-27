@@ -20,6 +20,7 @@ class UserCreate(SQLModel):
 class UserRead(SQLModel):
     id: int
     email: str
+    name: str
 
 
 class BlacklistedToken(SQLModel, table=True):
