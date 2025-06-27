@@ -1,17 +1,20 @@
-from fastapi import FastAPI, HTTPException, Depends, Cookie, Response, Request
+from fastapi import FastAPI, HTTPException, Depends, Cookie, Response, Request, logger
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlmodel import Session, select, SQLModel
-from typing import Optional
+from typing import Optional, List
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse
 import requests
+from transformers import pipeline
+# from fastapi import status
+from transformers import AutoTokenizer
 
 from database import engine, init_db
-from models import User, UserCreate, UserRead
+from models import User, UserCreate, UserRead, SummarizeRequest, SummarizeResponse, Summary, SummaryDetailResponse, SummaryHistoryItem
 from auth import (
     get_password_hash, 
     verify_password, 
@@ -30,14 +33,27 @@ GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI')
 FRONTEND_URL = os.getenv('FRONTEND_URL')
-
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv('REFRESH_TOKEN_EXPIRE_DAYS', 7))
+
+summarizer = None
+tokenizer = None
+MAX_TOKENS = 1024
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/login')
 
 @asynccontextmanager
 async def lifespan(app: SQLModel):
     print('Startup')
     init_db()
+    global summarizer, tokenizer
+    print('[Startup] Loading DistilBART summarization model...')
+    try:
+        summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+        tokenizer = AutoTokenizer.from_pretrained("sshleifer/distilbart-cnn-12-6")
+        print('[Startup] DistilBART model loaded successfully.')
+    except Exception as e:
+        summarizer = None
+        tokenizer = None
+        print(f'[Startup] Failed to load DistilBART model: {e}')
     yield
     print('Shutdown')
 
@@ -284,5 +300,121 @@ async def google_callback(request: Request, response: Response, session: Session
         "token_type": "bearer",
         "user": {"id": user.id, "email": user.email, "name": user.name}
     }
+
+def chunk_text(text, max_tokens=MAX_TOKENS):
+    tokens = tokenizer.encode(text)
+    for i in range(0, len(tokens), max_tokens):
+        yield tokenizer.decode(tokens[i:i+max_tokens])
+
+@app.post("/summarize_text", response_model=SummarizeResponse)
+def summarize_document(
+    request: SummarizeRequest,
+    current_user: dict = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    input_text = request.text.strip()
+    if not input_text:
+        raise HTTPException(status_code=400, detail="Input text must not be empty or whitespace.")
+
+    # Chunk and summarize
+    summaries = []
+    for chunk in chunk_text(input_text):
+        summary = summarizer(
+            chunk,
+            max_length=256,
+            min_length=64,
+            do_sample=False,
+            num_beams=8
+        )[0]["summary_text"]
+        summaries.append(summary)
+    # Optionally, summarize the summaries for a final summary
+    if len(summaries) > 1:
+        final_summary = summarizer(
+            " ".join(summaries),
+            max_length=256,
+            min_length=64,
+            do_sample=False,
+            num_beams=6
+        )[0]["summary_text"]
+    else:
+        final_summary = summaries[0]
+
+    # Generate a title from the summary
+    title_source = final_summary if final_summary else input_text
+    title_words = title_source.split()
+    title = " ".join(title_words[:10]) + ("..." if len(title_words) > 10 else "")
+    title = title[:252] + "..." if len(title) > 255 else title
+
+    # Save to database
+    summary = Summary(
+        user_id=current_user.id,
+        original_text=input_text,
+        summary_text=final_summary,
+        title=title
+    )
+    session.add(summary)
+    session.commit()
+    session.refresh(summary)
+
+    return SummarizeResponse(summary=final_summary)
+
+@app.get("/summaries", response_model=List[SummaryHistoryItem])
+def get_summaries(
+    current_user: dict = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    user_id = current_user["sub"] if isinstance(current_user, dict) else current_user.id
+    summaries = session.exec(
+        select(Summary).where(Summary.user_id == user_id).order_by(Summary.created_at.desc())
+    ).all()
+    def make_preview(text):
+        # Use the first sentence as preview, or first 100 chars if no period
+        if "." in text:
+            return text.split('. ')[0] + "."
+        return text[:100] + ("..." if len(text) > 100 else "")
+    return [
+        SummaryHistoryItem(
+            id=s.id,
+            title=s.title or make_preview(s.original_text),
+            preview=make_preview(s.summary_text),
+            timestamp=s.created_at.isoformat() if hasattr(s.created_at, 'isoformat') else str(s.created_at)
+        )
+        for s in summaries
+    ]
+
+@app.get("/summaries/{summary_id}", response_model=SummaryDetailResponse)
+def get_summary_by_id(
+    summary_id: int,
+    current_user: dict = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    user_id = current_user["sub"] if isinstance(current_user, dict) else current_user.id
+    summary = session.get(Summary, summary_id)
+    if not summary or summary.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Summary not found")
+    return SummaryDetailResponse(
+        id=summary.id,
+        title=summary.title or " ".join(summary.original_text.strip().split()[:10]),
+        original_text=summary.original_text,
+        summary_text=summary.summary_text,
+        timestamp=summary.created_at.isoformat() if hasattr(summary.created_at, 'isoformat') else str(summary.created_at)
+    )
+
+@app.delete("/summaries/{summary_id}")
+def delete_summary(
+    summary_id: int,
+    current_user: dict = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    user_id = current_user["sub"] if isinstance(current_user, dict) else current_user.id
+    summary = session.get(Summary, summary_id)
+    if not summary or summary.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Summary not found")
+    session.delete(summary)
+    session.commit()
+    return {"message": "Summary deleted successfully"}
+
+
+
 
 
