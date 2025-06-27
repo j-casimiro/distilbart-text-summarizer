@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Cookie, Response
+from fastapi import FastAPI, HTTPException, Depends, Cookie, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlmodel import Session, select, SQLModel
 from typing import Optional
@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import requests
 
 from database import engine, init_db
@@ -28,6 +28,7 @@ load_dotenv()
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI')
+FRONTEND_URL = os.getenv('FRONTEND_URL')
 
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv('REFRESH_TOKEN_EXPIRE_DAYS', 7))
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/login')
@@ -207,8 +208,12 @@ def google_login():
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
     return RedirectResponse(url)
 
-@app.get('/auth/google/callback')
-def google_callback(code: str, response: Response, session: Session = Depends(get_session)):
+@app.post('/auth/google/callback')
+async def google_callback(request: Request, response: Response, session: Session = Depends(get_session)):
+    data = await request.json()
+    code = data.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing code")
     # Exchange code for tokens
     token_data = {
         'code': code,
@@ -221,7 +226,6 @@ def google_callback(code: str, response: Response, session: Session = Depends(ge
     if not token_resp.ok:
         raise HTTPException(status_code=400, detail='Failed to obtain token from Google')
     tokens = token_resp.json()
-    id_token = tokens.get('id_token')
     access_token = tokens.get('access_token')
     if not access_token:
         raise HTTPException(status_code=400, detail='No access token from Google')
@@ -255,6 +259,8 @@ def google_callback(code: str, response: Response, session: Session = Depends(ge
     app_access_token = create_access_token(data={'sub': str(user.id)})
     app_refresh_token = create_refresh_token(data={'sub': str(user.id)})
     max_age = int(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS).total_seconds())
+
+    # Set refresh token as HTTP-only cookie
     response.set_cookie(
         key='refresh_token',
         value=app_refresh_token,
@@ -263,12 +269,12 @@ def google_callback(code: str, response: Response, session: Session = Depends(ge
         samesite="none",
         max_age=max_age
     )
-    # You can redirect to frontend with access token as query param, or return JSON
+
+    # Return access token in JSON response
     return {
-        'access_token': app_access_token,
-        'refresh_token': app_refresh_token,
-        'token_type': 'bearer',
-        'user': {'id': user.id, 'email': user.email, 'name': user.name}
+        "access_token": app_access_token,
+        "token_type": "bearer",
+        "user": {"id": user.id, "email": user.email, "name": user.name}
     }
 
 
