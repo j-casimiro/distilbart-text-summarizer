@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Cookie, Response, Request, logger
+from fastapi import FastAPI, HTTPException, Depends, Cookie, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlmodel import Session, select, SQLModel
 from typing import Optional, List
@@ -9,9 +9,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 from fastapi.responses import RedirectResponse
 import requests
-from transformers import pipeline
-# from fastapi import status
-from transformers import AutoTokenizer
+from transformers import pipeline, AutoTokenizer
 
 from database import engine, init_db
 from models import User, UserCreate, UserRead, SummarizeRequest, SummarizeResponse, Summary, SummaryDetailResponse, SummaryHistoryItem
@@ -27,6 +25,7 @@ from auth import (
     validate_token
 )
 
+# Centralize environment variable loading
 load_dotenv()
 ENV = os.getenv("ENV", "prod")
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
@@ -81,6 +80,9 @@ def get_session():
     with Session(engine) as session:
         yield session
 
+def get_user_by_email(session: Session, email: str) -> Optional[User]:
+    return session.exec(select(User).where(User.email == email)).first()
+
 @app.get('/')
 def index():
     return {
@@ -91,7 +93,7 @@ def index():
 
 @app.post('/register', response_model=UserRead)
 def register(user: UserCreate, session: Session = Depends(get_session)):
-    if session.exec(select(User).where(User.email == user.email)).first():
+    if get_user_by_email(session, user.email):
         raise HTTPException(status_code=400, detail='email already exist')
     if not verify_email(user.email):
         raise HTTPException(status_code=400, detail='email is invalid')
@@ -103,7 +105,7 @@ def register(user: UserCreate, session: Session = Depends(get_session)):
     session.add(db_user)
     session.commit()
     session.refresh(db_user)
-    return {'id': db_user.id, 'email': db_user.email, 'name': db_user.name}
+    return UserRead(id=db_user.id, email=db_user.email, name=db_user.name)
 
 @app.post('/login')
 def login(
@@ -111,7 +113,7 @@ def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: Session = Depends(get_session)
 ):
-    user = session.exec(select(User).where(User.email == form_data.username)).first()
+    user = get_user_by_email(session, form_data.username)
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail='Invalid Credentials')
     access_token = create_access_token(data={'sub': str(user.id)})
@@ -131,7 +133,7 @@ def login(
         'token_type': 'bearer'
     }
 
-def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Depends(get_session)):
+def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Depends(get_session)) -> User:
     validate_token(token, session)
     payload = decode_token(token)
     user_id = int(payload.get('sub'))
@@ -142,7 +144,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Dep
 
 @app.get('/current_user', response_model=UserRead)
 def read_current_user(current_user: User = Depends(get_current_user)):
-    return current_user
+    return UserRead(id=current_user.id, email=current_user.email, name=current_user.name)
 
 @app.post('/refresh')
 def refresh_token(
@@ -268,7 +270,7 @@ async def google_callback(request: Request, response: Response, session: Session
         raise HTTPException(status_code=400, detail='Google account has no email')
 
     # Check if user exists, else create
-    user = session.exec(select(User).where(User.email == email)).first()
+    user = get_user_by_email(session, email)
     if not user:
         user = User(
             name=name or email.split('@')[0],
@@ -309,9 +311,12 @@ def chunk_text(text, max_tokens=MAX_TOKENS):
 @app.post("/summarize_text", response_model=SummarizeResponse)
 def summarize_document(
     request: SummarizeRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
+    if summarizer is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Summarization model is not loaded. Please try again later.")
+
     input_text = request.text.strip()
     if not input_text:
         raise HTTPException(status_code=400, detail="Input text must not be empty or whitespace.")
@@ -367,10 +372,10 @@ def summarize_document(
 
 @app.get("/summaries", response_model=List[SummaryHistoryItem])
 def get_summaries(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    user_id = current_user["sub"] if isinstance(current_user, dict) else current_user.id
+    user_id = current_user.id
     summaries = session.exec(
         select(Summary).where(Summary.user_id == user_id).order_by(Summary.created_at.desc())
     ).all()
@@ -392,10 +397,10 @@ def get_summaries(
 @app.get("/summaries/{summary_id}", response_model=SummaryDetailResponse)
 def get_summary_by_id(
     summary_id: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    user_id = current_user["sub"] if isinstance(current_user, dict) else current_user.id
+    user_id = current_user.id
     summary = session.get(Summary, summary_id)
     if not summary or summary.user_id != user_id:
         raise HTTPException(status_code=404, detail="Summary not found")
@@ -410,10 +415,10 @@ def get_summary_by_id(
 @app.delete("/summaries/{summary_id}")
 def delete_summary(
     summary_id: int,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    user_id = current_user["sub"] if isinstance(current_user, dict) else current_user.id
+    user_id = current_user.id
     summary = session.get(Summary, summary_id)
     if not summary or summary.user_id != user_id:
         raise HTTPException(status_code=404, detail="Summary not found")
